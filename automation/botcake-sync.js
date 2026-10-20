@@ -9,14 +9,21 @@
     1) полный список юзеров страницы из BotCake API (~800 запросов на 8 тыс. юзеров);
     2) история tags — только тем, у кого с прошлого прогона сменилась активность
        или набор tags, плюс новым. С --full — всем (бэкфилл, ~8 тыс. запросов);
-    3) из истории считает дни, когда юзеру ставили STREAK_TAG (Daily Prize Claimed):
-       всего, за 30 дней, текущий и лучший стрик;
+    3) по каждому tag из track_tags бренда (конфиг) считает дни, когда юзеру его
+       ставили: всего, за 30 дней, последний раз; со "streak": true — ещё текущий
+       и лучший стрик;
     4) переписывает вкладку бренда целиком и добавляет строку во вкладку «Лог».
 
+  track_tags в конфиге бренда — список строк или { "name": "...", "streak": true }.
+  Новый tag миссии = дописать его туда и обновить Secret (botcake-profile-push.js
+  secrets); код трогать не нужно, колонки появятся на следующем прогоне.
+
   Таблица и есть состояние между прогонами: служебные колонки _last_utc и _events
-  (скрыты) хранят сырую активность и даты событий. Юзеров, которых не было в
-  очередном проходе (список сдвигается, пока его читаешь), не удаляем — их строка
-  просто не обновляется.
+  (скрыты) хранят сырую активность и даты ВСЕХ tags за 120 дней — поэтому tag,
+  добавленный в track_tags позже, сразу получает историю. Старые строки читаются
+  по названиям колонок, а не по позициям: смена набора колонок их не ломает.
+  Юзеров, которых не было в очередном проходе (список сдвигается, пока его
+  читаешь), не удаляем — их строка просто не обновляется.
 
   Вкладка в таблице = alias бренда заглавными. ID таблицы — sheet_id из конфига.
 
@@ -34,21 +41,27 @@ const sheets = require('./sheets');
 const bc = require('./botcake');
 
 const LOG_TAB = 'Лог';
-const STREAK_TAG = 'Daily Prize Claimed';
 const PAGE_TZ_OFFSET_H = -5;
 const EVENTS_KEEP_DAYS = 120;
 const CONCURRENCY = 10;
 
-const HEADER = [
-  // «Первый контакт с ботом» = date_subscribed_at BotCake: первое взаимодействие с ботом
-  // (коммент с ответом в личку, личка, ссылка), а не подписка на FB-страницу.
-  'PSID', 'Имя', 'Первый контакт с ботом', 'Последняя активность (Kyiv)', 'Дней без активности',
-  'Tags', 'ad_id',
-  `${STREAK_TAG}: всего`, `${STREAK_TAG}: 30 дней`, 'Стрик сейчас', 'Лучший стрик', 'Последний claim',
-  'В синке с', 'Обновлено (Kyiv)', '_last_utc', '_events',
+// «Первый контакт с ботом» = date_subscribed_at BotCake: первое взаимодействие с ботом
+// (коммент с ответом в личку, личка, ссылка), а не подписка на FB-страницу.
+const BASE_COLS = ['PSID', 'Имя', 'Первый контакт с ботом', 'Последняя активность (Kyiv)', 'Дней без активности', 'Tags', 'ad_id'];
+const TAIL_COLS = ['В синке с', 'Обновлено (Kyiv)', '_last_utc', '_events'];
+const HIDDEN_COLS = ['_last_utc', '_events'];
+
+function trackTagsOf(brand) {
+  const raw = bc.loadConfig().brands[brand].track_tags || [];
+  return raw.map((t) => (typeof t === 'string' ? { name: t, streak: false } : { name: t.name, streak: !!t.streak }));
+}
+
+const tagCols = (t) => [
+  `${t.name}: дней всего`, `${t.name}: за 30 дней`, `${t.name}: последний раз`,
+  ...(t.streak ? [`${t.name}: стрик сейчас`, `${t.name}: лучший стрик`] : []),
 ];
-const COL = Object.fromEntries(HEADER.map((h, i) => [h, i]));
-const LAST_COL = sheets.indexToCol(HEADER.length - 1);
+
+const headerOf = (tracked) => [...BASE_COLS, ...tracked.flatMap(tagCols), ...TAIL_COLS];
 const LOG_HEADER = ['Время (Kyiv)', 'Бренд', 'Юзеров в таблице', 'Прошли в API', 'Новых', 'Обновлена история', 'Секунд', 'Статус'];
 
 const kyiv = (ms) => new Date(ms).toLocaleString('sv-SE', { timeZone: 'Europe/Kyiv' }).slice(0, 16);
@@ -120,54 +133,78 @@ async function setup() {
   console.log('таблица готова: вкладка «Лог», локаль en_US, пояс Europe/Kiev');
 }
 
-async function formatBrandTab(tab) {
+async function tabSheetId(tab) {
   const m = await sheets.meta('sheets.properties(sheetId,title)');
-  const id = m.sheets.find((s) => s.properties.title === tab).properties.sheetId;
-  await sheets.write(`'${tab}'!A1:${LAST_COL}1`, [HEADER], { raw: true });
-  const hiddenFrom = COL._last_utc;
-  await sheets.batchUpdate([
-    { updateSheetProperties: { properties: { sheetId: id, gridProperties: { frozenRowCount: 1, frozenColumnCount: 2 } }, fields: 'gridProperties.frozenRowCount,gridProperties.frozenColumnCount' } },
-    { repeatCell: { range: { sheetId: id, startRowIndex: 0, endRowIndex: 1 }, cell: { userEnteredFormat: { textFormat: { bold: true }, wrapStrategy: 'WRAP' } }, fields: 'userEnteredFormat.textFormat.bold,userEnteredFormat.wrapStrategy' } },
-    { updateDimensionProperties: { range: { sheetId: id, dimension: 'COLUMNS', startIndex: hiddenFrom, endIndex: HEADER.length }, properties: { hiddenByUser: true }, fields: 'hiddenByUser' } },
-  ]);
+  const s = m.sheets.find((x) => x.properties.title === tab);
+  return s ? s.properties.sheetId : null;
 }
 
 async function ensureBrandTab(tab) {
-  const m = await sheets.meta('sheets.properties(sheetId,title)');
-  if (m.sheets.some((s) => s.properties.title === tab)) return;
+  if (await tabSheetId(tab) !== null) return;
   await sheets.batchUpdate([{ addSheet: { properties: { title: tab } } }]);
-  await formatBrandTab(tab);
+  const id = await tabSheetId(tab);
+  await sheets.batchUpdate([
+    { updateSheetProperties: { properties: { sheetId: id, gridProperties: { frozenRowCount: 1, frozenColumnCount: 2 } }, fields: 'gridProperties.frozenRowCount,gridProperties.frozenColumnCount' } },
+    { repeatCell: { range: { sheetId: id, startRowIndex: 0, endRowIndex: 1 }, cell: { userEnteredFormat: { textFormat: { bold: true }, wrapStrategy: 'WRAP' } }, fields: 'userEnteredFormat.textFormat.bold,userEnteredFormat.wrapStrategy' } },
+  ]);
 }
 
+/* Набор колонок поменялся (новый tag в track_tags) → данные уже записаны по новой
+   шапке; добиваем вид: хвост старой, более широкой шапки чистим, служебные колонки
+   прячем заново (их позиции сдвинулись), остальные показываем. */
+async function relayoutTab(tab, header, oldWidth, rowCount) {
+  const id = await tabSheetId(tab);
+  const width = Math.max(header.length, oldWidth);
+  const reqs = [
+    { updateDimensionProperties: { range: { sheetId: id, dimension: 'COLUMNS', startIndex: 0, endIndex: width }, properties: { hiddenByUser: false }, fields: 'hiddenByUser' } },
+    ...HIDDEN_COLS.map((name) => {
+      const i = header.indexOf(name);
+      return { updateDimensionProperties: { range: { sheetId: id, dimension: 'COLUMNS', startIndex: i, endIndex: i + 1 }, properties: { hiddenByUser: true }, fields: 'hiddenByUser' } };
+    }),
+  ];
+  if (oldWidth > header.length) {
+    reqs.push({ updateCells: { range: { sheetId: id, startRowIndex: 0, endRowIndex: rowCount + 1, startColumnIndex: header.length, endColumnIndex: oldWidth }, fields: 'userEnteredValue' } });
+  }
+  await sheets.batchUpdate(reqs);
+}
+
+// Читаем по названиям колонок из шапки, которая лежит в таблице сейчас, а не по позициям:
+// после смены track_tags старые строки иначе съехали бы.
 async function readState(tab) {
-  const rows = await sheets.read(`'${tab}'!A2:${LAST_COL}`);
+  const rows = await sheets.read(`'${tab}'!A1:ZZ`);
+  const oldHeader = rows[0] || [];
+  const at = Object.fromEntries(oldHeader.map((h, i) => [h, i]));
+  const get = (r, name) => (at[name] === undefined ? '' : r[at[name]] || '');
   const state = new Map();
-  for (const r of rows) {
-    const psid = r[COL.PSID];
+  for (const r of rows.slice(1)) {
+    const psid = get(r, 'PSID');
     if (!psid) continue;
     let events = {};
-    try { events = JSON.parse(r[COL._events] || '{}'); } catch (_) { /* битая ячейка — пересчитаем */ }
+    try { events = JSON.parse(get(r, '_events') || '{}'); } catch (_) { /* битая ячейка — пересчитаем */ }
     state.set(psid, {
-      name: r[COL['Имя']] || '',
-      subscribed: r[COL['Первый контакт с ботом']] || '',
-      tags: r[COL.Tags] || '',
-      adId: r[COL.ad_id] || '',
-      since: r[COL['В синке с']] || '',
-      updated: r[COL['Обновлено (Kyiv)']] || '',
-      lastUtc: r[COL._last_utc] || '',
+      name: get(r, 'Имя'),
+      subscribed: get(r, 'Первый контакт с ботом'),
+      tags: get(r, 'Tags'),
+      adId: get(r, 'ad_id'),
+      since: get(r, 'В синке с'),
+      updated: get(r, 'Обновлено (Kyiv)'),
+      lastUtc: get(r, '_last_utc'),
       events,
     });
   }
-  return state;
+  return { state, oldHeader };
 }
 
 async function sync(brand, { full = false, dry = false } = {}) {
   const started = Date.now();
   const pageId = bc.pageIdOf(brand);
   const tab = brand.toUpperCase();
+  const tracked = trackTagsOf(brand);
+  const header = headerOf(tracked);
+  const col = Object.fromEntries(header.map((h, i) => [h, i]));
   if (!dry) await ensureBrandTab(tab);
 
-  const [state, tagList, customers] = await Promise.all([
+  const [{ state, oldHeader }, tagList, customers] = await Promise.all([
     readState(tab),
     bc.getTags(pageId),
     bc.listCustomers(pageId, { concurrency: CONCURRENCY }),
@@ -217,24 +254,28 @@ async function sync(brand, { full = false, dry = false } = {}) {
 
   const rows = [...merged.entries()].map(([psid, u]) => {
     const lastMs = u.lastUtc ? utcMs(u.lastUtc) : null;
-    const s = streakStats(u.events[STREAK_TAG] || [], nowMs);
-    const row = new Array(HEADER.length).fill('');
-    row[COL.PSID] = psid;
-    row[COL['Имя']] = u.name;
-    row[COL['Первый контакт с ботом']] = u.subscribed;
-    row[COL['Последняя активность (Kyiv)']] = lastMs ? kyiv(lastMs) : '';
-    row[COL['Дней без активности']] = lastMs ? Math.floor((nowMs - lastMs) / DAY) : '';
-    row[COL.Tags] = u.tags;
-    row[COL.ad_id] = u.adId;
-    row[COL[`${STREAK_TAG}: всего`]] = s.total;
-    row[COL[`${STREAK_TAG}: 30 дней`]] = s.last30;
-    row[COL['Стрик сейчас']] = s.current;
-    row[COL['Лучший стрик']] = s.best;
-    row[COL['Последний claim']] = s.last;
-    row[COL['В синке с']] = u.since;
-    row[COL['Обновлено (Kyiv)']] = u.updated;
-    row[COL._last_utc] = u.lastUtc;
-    row[COL._events] = JSON.stringify(u.events);
+    const row = new Array(header.length).fill('');
+    row[col.PSID] = psid;
+    row[col['Имя']] = u.name;
+    row[col['Первый контакт с ботом']] = u.subscribed;
+    row[col['Последняя активность (Kyiv)']] = lastMs ? kyiv(lastMs) : '';
+    row[col['Дней без активности']] = lastMs ? Math.floor((nowMs - lastMs) / DAY) : '';
+    row[col.Tags] = u.tags;
+    row[col.ad_id] = u.adId;
+    for (const t of tracked) {
+      const s = streakStats(u.events[t.name] || [], nowMs);
+      row[col[`${t.name}: дней всего`]] = s.total;
+      row[col[`${t.name}: за 30 дней`]] = s.last30;
+      row[col[`${t.name}: последний раз`]] = s.last;
+      if (t.streak) {
+        row[col[`${t.name}: стрик сейчас`]] = s.current;
+        row[col[`${t.name}: лучший стрик`]] = s.best;
+      }
+    }
+    row[col['В синке с']] = u.since;
+    row[col['Обновлено (Kyiv)']] = u.updated;
+    row[col._last_utc] = u.lastUtc;
+    row[col._events] = JSON.stringify(u.events);
     return { lastMs: lastMs || 0, row };
   }).sort((a, b) => b.lastMs - a.lastMs).map((x) => x.row);
 
@@ -243,14 +284,18 @@ async function sync(brand, { full = false, dry = false } = {}) {
 
   if (dry) {
     console.log('--dry, в таблицу не пишу:', JSON.stringify(summary));
-    const withClaims = rows.filter((r) => r[COL[`${STREAK_TAG}: всего`]] > 0).length;
-    console.log(`с ${STREAK_TAG}: ${withClaims}, стрик сейчас ≥3: ${rows.filter((r) => r[COL['Стрик сейчас']] >= 3).length}`);
+    for (const t of tracked) {
+      const n = rows.filter((r) => r[col[`${t.name}: дней всего`]] > 0).length;
+      console.log(`  ${t.name}: у ${n} юзеров за ${EVENTS_KEEP_DAYS} дней`);
+    }
     return summary;
   }
 
   // PSID и даты пишем RAW: в USER_ENTERED 17-значный PSID превратится в число и потеряет цифры.
-  // Шапку пишем каждый раз вместе с данными — переименование колонки в HEADER доезжает само.
-  await sheets.write(`'${tab}'!A1:${LAST_COL}${rows.length + 1}`, [HEADER, ...rows], { raw: true });
+  // Шапку пишем каждый раз вместе с данными — новые колонки и переименования доезжают сами.
+  const lastCol = sheets.indexToCol(header.length - 1);
+  await sheets.write(`'${tab}'!A1:${lastCol}${rows.length + 1}`, [header, ...rows], { raw: true });
+  if (oldHeader.join('\u0001') !== header.join('\u0001')) await relayoutTab(tab, header, oldHeader.length, rows.length);
   await sheets.append(`'${LOG_TAB}'!A:H`, [[nowKyiv, tab, rows.length, customers.length, newCount, toRefresh.length, Math.round((Date.now() - started) / 1000), 'ok']]);
   console.log(JSON.stringify(summary));
   return summary;
