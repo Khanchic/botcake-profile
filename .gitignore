@@ -1,0 +1,3 @@
+automation/secrets/
+*.log
+node_modules/

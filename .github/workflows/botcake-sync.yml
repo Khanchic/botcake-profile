@@ -1,0 +1,55 @@
+name: BotCake profile sync
+
+# Раз в час: юзеры BotCake → Google Sheet (automation/botcake-sync.js).
+#
+# Единственный триггер — cron-job.org: каждый час шлёт POST workflow_dispatch.
+# Своего schedule тут нет специально: репо публичный, а в публичных репо GitHub
+# сам выключает workflow с schedule после 60 дней без коммитов.
+#
+# Репо публичный → минуты Actions безлимитные, длительность прогона не важна.
+# Бренды, page_id, токены и ID таблицы — только в Secrets:
+#   BOTCAKE_CONFIG_JSON — формат в шапке automation/botcake.js
+#   GSHEETS_KEY_JSON    — ключ service account Google
+on:
+  workflow_dispatch:
+    inputs:
+      brand:
+        description: 'alias бренда из конфига (пусто = все бренды)'
+        required: false
+        default: ''
+      full:
+        description: 'Непусто = пересчитать историю всем (бэкфилл, ~6 мин на бренд)'
+        required: false
+
+concurrency:
+  group: botcake-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Восстановить ключ Google
+        env:
+          GSHEETS_KEY_JSON: ${{ secrets.GSHEETS_KEY_JSON }}
+        run: |
+          mkdir -p automation/secrets
+          printf '%s' "$GSHEETS_KEY_JSON" > automation/secrets/gsheets-key.json
+
+      - name: Синк
+        env:
+          BOTCAKE_CONFIG_JSON: ${{ secrets.BOTCAKE_CONFIG_JSON }}
+          BRAND: ${{ github.event.inputs.brand }}
+          FULL: ${{ github.event.inputs.full }}
+        run: |
+          node --version
+          if [ -n "$BRAND" ]; then ARGS="--brand $BRAND"; else ARGS="--all"; fi
+          if [ -n "$FULL" ]; then ARGS="$ARGS --full"; fi
+          node automation/botcake-sync.js $ARGS
+
+      - name: Убрать ключ
+        if: always()
+        run: rm -f automation/secrets/gsheets-key.json
