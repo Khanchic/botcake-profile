@@ -83,11 +83,18 @@ async function api(pageId, pathAndQuery, opts = {}) {
   const url = `${BASE}/pages/${pageId}${pathAndQuery}`;
 
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, {
-      method: opts.method || 'GET',
-      headers: { 'access-token': token, 'Content-Type': 'application/json' },
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-    });
+    let res;
+    try {
+      res = await fetch(url, {
+        method: opts.method || 'GET',
+        headers: { 'access-token': token, 'Content-Type': 'application/json' },
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+    } catch (e) {
+      // обрыв соединения («fetch failed») на длинных проходах бывает — повторяем, как 5xx
+      if (attempt < 4) { await new Promise((r) => setTimeout(r, (attempt + 1) * 2000)); continue; }
+      throw e;
+    }
 
     if ((res.status === 429 || res.status >= 500) && attempt < 4) {
       await new Promise((r) => setTimeout(r, (attempt + 1) * 2000));

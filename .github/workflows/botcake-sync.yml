@@ -13,6 +13,10 @@ name: BotCake profile sync
 on:
   workflow_dispatch:
     inputs:
+      task:
+        description: 'sync (по умолчанию, раз в час) | weekly (снимок недели + сброс миссий, пн 00:00 ET)'
+        required: false
+        default: 'sync'
       brand:
         description: 'alias бренда из конфига (пусто = все бренды)'
         required: false
@@ -44,8 +48,13 @@ jobs:
           BOTCAKE_CONFIG_JSON: ${{ secrets.BOTCAKE_CONFIG_JSON }}
           BRAND: ${{ github.event.inputs.brand }}
           FULL: ${{ github.event.inputs.full }}
+          TASK: ${{ github.event.inputs.task }}
         run: |
           node --version
+          if [ "$TASK" = "weekly" ]; then
+            if [ -n "$BRAND" ]; then node automation/botcake-weekly.js --brand "$BRAND"; else node automation/botcake-weekly.js; fi
+            exit 0
+          fi
           if [ -n "$BRAND" ]; then ARGS="--brand $BRAND"; else ARGS="--all"; fi
           if [ -n "$FULL" ]; then ARGS="$ARGS --full"; fi
           node automation/botcake-sync.js $ARGS
