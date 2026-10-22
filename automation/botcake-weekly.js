@@ -32,11 +32,15 @@ const DEFAULTS = {
   w_view: '0', w_pz: '0', w_done: '0',
   w_view_r1: 'false', w_view_r2: 'false', w_view_r3: 'false', w_view_r4: 'false',
   w_pz_p1: 'false', w_pz_p2: 'false', w_pz_p3: 'false', w_pz_p4: 'false', w_pz_p5: 'false', w_pz_p6: 'false', w_pz_p7: 'false',
-  w_pred: '⬜', w_sub: '⬜', w_story: '⬜',
-  c_a: '⬜', c_b: '⬜', c_c: '⬜', c_gold: '⬜', c_last: ' ', c_set: 'false',
-  r_line: ' ', r_drop: ' ',
+  s_view: '0/2', s_pz: '0/3', w_pred: '0/1', w_sub: '0/1', w_story: '0/1',
+  c_a: '⬜', c_b: '⬜', c_c: '⬜', c_gold: ' ', c_last: ' ', c_set: 'false',
+  r_line: ' ', r_drop: ' ', r_all: ' ',
 };
 const GOALS = { w_view: 2, w_pz: 3 };
+// API хранит ' ' как null — сравниваем без пробелов
+const norm = (x) => String(x ?? '').trim();
+// в c_a/c_b/c_c лежит ⬜ или эмодзи предмета, в c_gold — '+ 🌟'
+const hasItem = (x) => !['', '⬜'].includes(norm(x));
 
 const HEADER = [
   'Неделя (пн, ET)', 'Снимок (Kyiv)', 'Игроков с шагом',
@@ -109,8 +113,8 @@ async function run(brand, { dry = false, snapshotOnly = false } = {}) {
     const d = done(s);
     view += d.view; pz += d.pz; pred += d.pred; sub += d.sub; story += d.story;
     if (active(s)) act++;
-    coll[['c_a', 'c_b', 'c_c'].filter((k) => s.v[k] === '✅').length]++;
-    if (s.v.c_gold === '🌟') gold++;
+    coll[['c_a', 'c_b', 'c_c'].filter((k) => hasItem(s.v[k])).length]++;
+    if (norm(s.v.c_gold).includes('🌟')) gold++;
     if (s.v.c_set === 'true') prize++;
   }
 
@@ -118,7 +122,7 @@ async function run(brand, { dry = false, snapshotOnly = false } = {}) {
   const prevRows = dry ? [] : await sheets.read(`'${TAB}'!A2:Q`).catch(() => []);
   const prevBonus = prevRows.length ? Number(prevRows[prevRows.length - 1][15] || 0) : bonusTotal;
 
-  const toReset = states.filter((s) => Object.entries(DEFAULTS).some(([n, def]) => (s.v[n] ?? '') !== def));
+  const toReset = states.filter((s) => Object.entries(DEFAULTS).some(([n, def]) => norm(s.v[n]) !== norm(def)));
   const row = [weekLabel(Date.now()), kyiv(Date.now()), act, view, pz, pred, sub, story, ...coll, gold, prize,
     Math.max(0, bonusTotal - prevBonus), bonusTotal, snapshotOnly ? 0 : toReset.length];
 
