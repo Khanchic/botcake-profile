@@ -2,8 +2,9 @@
 /*
   botcake-weekly.js — недельный цикл миссий: снимок недели во вкладку «Миссии» и сброс прогресса.
 
-  Запуск в GitHub Actions по cron-job.org в понедельник 00:00 America/New_York
-  (workflow_dispatch с inputs.task = weekly). Порядок: сначала снимок, потом сброс —
+  Запуск (с 11.11.2026): каждый часовой синк зовёт `--auto` — в понедельник по ET первый же прогон
+  (05:01 UTC) делает снимок + сброс тем брендам миссий, у кого нет строки недели; отдельный cron не нужен.
+  Ручной запуск — workflow_dispatch с inputs.task = weekly. Порядок: сначала снимок, потом сброс —
   чтобы цифры прошлой недели не потерялись. Бренды идут по очереди: упал один —
   остальные всё равно считаются, код выхода 1 в конце.
 
@@ -24,6 +25,7 @@
     node automation/botcake-weekly.js --brand <alias> --dry            — посчитать и показать, ничего не писать
     node automation/botcake-weekly.js --brand <alias>                  — снимок + сброс
     node automation/botcake-weekly.js --brand <alias> --snapshot-only
+    node automation/botcake-weekly.js --auto [--dry]                    — пн по ET: сброс брендов без строки недели
     node automation/botcake-weekly.js --brand <alias> --set-view off|on [--dry]
         — неделя без видео-постов: строка видео-миссии в карточке «back next week» (или обратно)
           у всех игроков миссий; новичкам то же решает bot field view_on во flow.
@@ -217,8 +219,33 @@ async function ensureTab() {
   await sheets.batchUpdate([{ repeatCell: { range: { sheetId: id, startRowIndex: 0, endRowIndex: 1 }, cell: { userEnteredFormat: { textFormat: { bold: true }, wrapStrategy: 'WRAP' } }, fields: 'userEnteredFormat.textFormat.bold,userEnteredFormat.wrapStrategy' } }]);
 }
 
+// --auto: зовётся каждым часовым синком. Сбрасывает только в понедельник по ET и только бренды, у которых
+// в «Миссии» ещё нет строки прошедшей недели (повторный запуск в тот же пн ничего не делает).
+// Во вторник и позже не догоняет: сброс посреди недели стёр бы прогресс игроков — только строка в «Лог».
+async function auto({ dry = false } = {}) {
+  const now = Date.now();
+  const etDay = new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' });
+  const list = bc.brands().filter((b) => (bc.loadConfig().brands[b] || {}).missions);
+  if (etDay !== 'Mon') { console.log(`auto: сегодня ${etDay} по ET, сброс только в пн`); return; }
+  const label = weekLabel(now);
+  sheets.setSpreadsheetId(bc.loadConfig().sheet_id);
+  const rows = await sheets.read(`'${TAB}'!A2:B`).catch(() => []);
+  const done = new Set(rows.map((r) => `${r[0]}|${String(r[1] || '').toUpperCase()}`));
+  const todo = list.filter((b) => !done.has(`${label}|${b.toUpperCase()}`));
+  console.log(`auto: неделя ${label}, бренды миссий ${list.join(',') || '—'}, к сбросу: ${todo.join(',') || 'нет'}`);
+  let failed = 0;
+  for (const brand of todo) {
+    try { await run(brand, { dry }); } catch (e) {
+      failed++; console.error(e.message);
+      if (!dry) await sheets.append(`'${LOG_TAB}'!A:H`, [[kyiv(Date.now()), brand.toUpperCase(), '', '', 'недельный сброс (auto)', '', '', `ошибка: ${e.message}`.slice(0, 500)]]).catch(() => {});
+    }
+  }
+  if (failed) throw new Error(`auto: упало брендов ${failed}`);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.auto) { await auto({ dry: !!args.dry }); return; }
   const list = args.brand ? [String(args.brand).toLowerCase()] : bc.brands();
   if (args['set-view']) {
     if (!args.brand) throw new Error('--set-view только с --brand');

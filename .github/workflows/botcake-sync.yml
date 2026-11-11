@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: 'sync (по умолчанию, раз в час) | weekly (снимок недели + сброс миссий, пн 00:00 ET)'
+        description: 'sync (по умолчанию, раз в час; в пн по ET сам делает недельный сброс миссий) | weekly (ручной снимок + сброс)'
         required: false
         default: 'sync'
       brand:
@@ -55,6 +55,8 @@ jobs:
             if [ -n "$BRAND" ]; then node automation/botcake-weekly.js --brand "$BRAND"; else node automation/botcake-weekly.js; fi
             exit 0
           fi
+          # недельный сброс миссий: в пн по ET первый часовой прогон (ошибка не валит синк, пишется в «Лог»)
+          if [ -z "$BRAND" ]; then node automation/botcake-weekly.js --auto || echo "weekly --auto: ошибка, см. Лог"; fi
           if [ -n "$BRAND" ]; then ARGS="--brand $BRAND"; else ARGS="--all"; fi
           if [ -n "$FULL" ]; then ARGS="$ARGS --full"; fi
           node automation/botcake-sync.js $ARGS
